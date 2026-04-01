@@ -10,7 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 from analysis import get_encoder_weight_df, overall_latent_importance, aggregate_by_muscle, get_effective_yaw_weights, get_raw_feature_variance
 
-df = pd.read_csv("all10_big.csv")
+df = pd.read_csv("preprocessedCache.csv")
 
 clade_dict = {
     "Actias luna": "silkmoth",
