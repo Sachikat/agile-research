@@ -10,7 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 from analysis import get_encoder_weight_df, overall_latent_importance, aggregate_by_muscle, get_effective_yaw_weights, get_raw_feature_variance
 
-df = pd.read_csv("preprocessedCache.csv")
+df = pd.read_csv("all10_big.csv")
 
 clade_dict = {
     "Actias luna": "silkmoth",
@@ -96,14 +96,39 @@ X = X_phase.merge(meta, on=["species", "moth", "trial", "wb"], how="left")
 X = X.merge(target, on=["species", "moth", "trial", "wb"], how="left")
 
 non_features = ["species", "moth", "trial", "wb", "wbfreq", "clade", "tz"]
-feature_cols = [c for c in X.columns if c not in non_features]
+required_muscles = sorted(df["muscle_base"].dropna().unique())
 
-X[feature_cols] = X[feature_cols].fillna(0)
+print("Required muscles:")
+print(required_muscles)
 
-min_wb = X["species"].value_counts().min()
+required_feature_cols = []
+for muscle in required_muscles:
+    for k in range(1, 11):
+        col = f"{muscle}_spike{k}"
+        if col in X.columns:
+            required_feature_cols.append(col)
+
+X_complete = X.dropna(subset=required_feature_cols).copy()
+
+print("Rows before complete-case filtering:", len(X))
+print("Rows after complete-case filtering:", len(X_complete))
+
+feature_cols = [c for c in X_complete.columns if c not in non_features]
+
+min_valid_wingbeats_per_species = 20
+
+species_counts = X_complete["species"].value_counts()
+valid_species = species_counts[species_counts >= min_valid_wingbeats_per_species].index.tolist()
+
+X_complete = X_complete[X_complete["species"].isin(valid_species)].copy()
+
+print("\nSpecies retained after complete-case filtering:")
+print(X_complete["species"].value_counts())
+
+min_wb = X_complete["species"].value_counts().min()
 
 X_bal = (
-    X.groupby("species", group_keys=False)
+    X_complete.groupby("species", group_keys=False)
     .sample(min_wb, random_state=0)
     .reset_index(drop=True)
 )
@@ -346,90 +371,90 @@ print("Using device:", device)
 
 results = []
 
-for latent_dim in [16, 8, 4, 2]:
+latent_dim = 2
 
-    model = MultiEncoderLinearAEYaw(
-        input_dim=len(feature_cols),
-        latent_dim=latent_dim,
-        num_species=num_species
-    )
+model = MultiEncoderLinearAEYaw(
+    input_dim=len(feature_cols),
+    latent_dim=latent_dim,
+    num_species=num_species
+)
 
-    history = train_model(
-        model,
-        train_loader,
-        test_loader,
-        alpha_recon=1.0,
-        beta_yaw=1.0,
-        epochs=200,
-        lr=1e-3,
-        weight_decay=1e-4,
-        device=device
-    )
+history = train_model(
+    model,
+    train_loader,
+    test_loader,
+    alpha_recon=1.0,
+    beta_yaw=1.0,
+    epochs=200,
+    lr=1e-3,
+    weight_decay=1e-4,
+    device=device
+)
 
-    eval_out = evaluate_model(
-        model,
-        test_loader,
-        x_scaler,
-        y_scaler,
-        device=device
-    )
+eval_out = evaluate_model(
+    model,
+    test_loader,
+    x_scaler,
+    y_scaler,
+    device=device
+)
 
-    print("Reconstruction MSE:", eval_out["recon_mse"])
-    print("Yaw MSE:", eval_out["yaw_mse"])
-    print("Yaw R2:", eval_out["yaw_r2"])
+print("Reconstruction MSE:", eval_out["recon_mse"])
+print("Yaw MSE:", eval_out["yaw_mse"])
+print("Yaw R2:", eval_out["yaw_r2"])
 
-    results.append({
-        "latent_dim": latent_dim,
-        "recon_mse": eval_out["recon_mse"],
-        "yaw_mse": eval_out["yaw_mse"],
-        "yaw_r2": eval_out["yaw_r2"]
-    })
+results.append({
+    "latent_dim": latent_dim,
+    "recon_mse": eval_out["recon_mse"],
+    "yaw_mse": eval_out["yaw_mse"],
+    "yaw_r2": eval_out["yaw_r2"]
+})
 
-    # total loss
-    plt.figure(figsize=(7, 5))
-    plt.plot(history["train_total"], label="train total")
-    plt.plot(history["test_total"], label="test total")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title(f"Total loss (latent_dim={latent_dim})")
-    plt.legend()
+# total loss
+plt.figure(figsize=(7, 5))
+plt.plot(history["train_total"], label="train total")
+plt.plot(history["test_total"], label="test total")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title(f"Total loss (latent_dim={latent_dim})")
+plt.legend()
+plt.tight_layout()
+plt.savefig(f"multi_encoder_total_loss_dim_{latent_dim}.png")
+plt.show()
+
+# yaw pred
+plt.figure(figsize=(6, 6))
+plt.scatter(eval_out["y_true"], eval_out["y_pred"], alpha=0.6, s=12)
+mn = min(eval_out["y_true"].min(), eval_out["y_pred"].min())
+mx = max(eval_out["y_true"].max(), eval_out["y_pred"].max())
+plt.plot([mn, mx], [mn, mx], "--")
+plt.xlabel("True tz")
+plt.ylabel("Predicted tz")
+plt.title(f"Predicted vs true yaw torque (latent_dim={latent_dim})")
+plt.tight_layout()
+plt.savefig(f"multi_encoder_pred_vs_true_dim_{latent_dim}.png")
+plt.show()
+
+# latent plot
+if latent_dim >= 2:
+    plt.figure(figsize=(9, 7))
+    for s in np.unique(eval_out["species_idx"]):
+        mask = eval_out["species_idx"] == s
+        plt.scatter(
+            eval_out["Z"][mask, 0],
+            eval_out["Z"][mask, 1],
+            s=10,
+            alpha=0.6,
+            label=idx_species[s]
+        )
+
+    plt.xlabel("Latent 1")
+    plt.ylabel("Latent 2")
+    plt.title(f"Shared latent space (latent_dim={latent_dim})")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
     plt.tight_layout()
-    plt.savefig(f"multi_encoder_total_loss_dim_{latent_dim}.png")
+    plt.savefig(f"multi_encoder_latent_space_dim_{latent_dim}.png")
     plt.show()
-
-    # yaw pred
-    plt.figure(figsize=(6, 6))
-    plt.scatter(eval_out["y_true"], eval_out["y_pred"], alpha=0.6, s=12)
-    mn = min(eval_out["y_true"].min(), eval_out["y_pred"].min())
-    mx = max(eval_out["y_true"].max(), eval_out["y_pred"].max())
-    plt.plot([mn, mx], [mn, mx], "--")
-    plt.xlabel("True tz")
-    plt.ylabel("Predicted tz")
-    plt.title(f"Predicted vs true yaw torque (latent_dim={latent_dim})")
-    plt.tight_layout()
-    plt.savefig(f"multi_encoder_pred_vs_true_dim_{latent_dim}.png")
-    plt.show()
-
-    # latent plot
-    if latent_dim >= 2:
-        plt.figure(figsize=(9, 7))
-        for s in np.unique(eval_out["species_idx"]):
-            mask = eval_out["species_idx"] == s
-            plt.scatter(
-                eval_out["Z"][mask, 0],
-                eval_out["Z"][mask, 1],
-                s=10,
-                alpha=0.6,
-                label=idx_species[s]
-            )
-
-        plt.xlabel("Latent 1")
-        plt.ylabel("Latent 2")
-        plt.title(f"Shared latent space (latent_dim={latent_dim})")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
-        plt.tight_layout()
-        plt.savefig(f"multi_encoder_latent_space_dim_{latent_dim}.png")
-        plt.show()
 
 results_df = pd.DataFrame(results)
 print("\nFinal results:")
