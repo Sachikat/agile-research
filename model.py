@@ -8,7 +8,6 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
-from analysis import *
 
 df = pd.read_csv("preprocessedCache.csv")
 
@@ -34,6 +33,7 @@ clade_dict = {
 }
 df["clade"] = df["species"].map(clade_dict)
 
+
 def base_muscle(m):
     m = str(m)
 
@@ -47,6 +47,7 @@ def base_muscle(m):
         return m.lower().replace("right", "").strip()
 
     return m
+
 
 df["muscle_base"] = df["muscle"].apply(base_muscle)
 
@@ -199,9 +200,11 @@ if len(all_nan_timing_cols) > 0:
 timing_values = timing_values.drop(columns=all_nan_timing_cols)
 timing_feature_cols = [c for c in timing_feature_cols if c not in all_nan_timing_cols]
 
+# rebuild masks to match kept timing columns
 mask_feature_cols = [f"{c}_missing" for c in timing_feature_cols]
 mask_bal = mask_bal[mask_feature_cols].copy()
 
+# impute remaining NaNs in timings with column means
 timing_values = timing_values.fillna(timing_values.mean())
 
 count_values = X_bal[count_feature_cols].copy().fillna(0)
@@ -222,10 +225,6 @@ X_model = pd.concat(
 )
 
 model_feature_cols = timing_feature_cols + count_feature_cols + mask_feature_cols
-
-print("\nFinal model feature count:", len(model_feature_cols))
-print("Any NaNs in model features?", X_model[model_feature_cols].isna().any().any())
-print("Any NaNs in tz?", X_model["tz"].isna().any())
 
 X_train_df, X_test_df, y_train, y_test, species_train, species_test = train_test_split(
     X_model[model_feature_cols],
@@ -484,6 +483,7 @@ for latent_dim in [16, 8, 4, 2]:
         plt.savefig(f"yaw_shared_latent_dim_{latent_dim}.png")
         plt.show()
 
+    # interpretation for this model
     effective_yaw_weights = get_effective_yaw_weights(model, model_feature_cols, species_names)
 
     print("\nTop yaw-related features by species:")
@@ -493,6 +493,7 @@ for latent_dim in [16, 8, 4, 2]:
         print("=" * 60)
         print(effective_yaw_weights[species].head(15))
 
+    # save per-latent-dim feature weights
     yaw_weight_df = pd.concat(
         [effective_yaw_weights[s].rename(s) for s in species_names],
         axis=1
@@ -503,171 +504,5 @@ results_df = pd.DataFrame(results)
 print("\nFinal results:")
 print(results_df)
 
-results_df.to_csv("multi_encoder_linear_ae_yaw_results.csv", index=False)
-X_bal.to_csv("motor_program_first10_balanced.csv", index=False)
-
-
-# ANALYSIS - print what muscles affected yaw torque based on spikes
-
-encoder_tables = get_encoder_weight_df(model, feature_cols, species_names)
-
-latent_feature_importance = {}
-latent_muscle_importance = {}
-effective_yaw_weights = get_effective_yaw_weights(model, feature_cols, species_names)
-effective_yaw_abs_importance = {}
-effective_yaw_muscle_importance = {}
-
-for species in species_names:
-    feat_imp = overall_latent_importance(encoder_tables[species])
-    latent_feature_importance[species] = feat_imp
-    latent_muscle_importance[species] = aggregate_by_muscle(feat_imp)
-
-    yaw_abs = effective_yaw_weights[species].abs().sort_values(ascending=False)
-    effective_yaw_abs_importance[species] = yaw_abs
-    effective_yaw_muscle_importance[species] = aggregate_by_muscle(yaw_abs)
-
-raw_feature_variance = get_raw_feature_variance(X_bal, feature_cols)
-
-TOP_N = 15
-
-for species in species_names:
-    print("\n" + "=" * 70)
-    print(f"SPECIES: {species}")
-    print("=" * 70)
-
-    print("\nTop latent-space spike features:")
-    print(latent_feature_importance[species].head(TOP_N))
-
-    print("\nTop latent-space muscles:")
-    print(latent_muscle_importance[species].head(TOP_N))
-
-    print("\nTop yaw-related spike features (signed):")
-    top_yaw_signed = effective_yaw_weights[species].reindex(
-        effective_yaw_weights[species].abs().sort_values(ascending=False).head(TOP_N).index
-    )
-    print(top_yaw_signed)
-
-    print("\nTop yaw-related muscles:")
-    print(effective_yaw_muscle_importance[species].head(TOP_N))
-
-
-latent_feat_df = pd.concat(
-    [latent_feature_importance[s].rename(s) for s in species_names],
-    axis=1
-)
-latent_feat_df["mean_importance"] = latent_feat_df.mean(axis=1)
-latent_feat_df["std_importance"] = latent_feat_df[species_names].std(axis=1)
-
-latent_muscle_df = pd.concat(
-    [latent_muscle_importance[s].rename(s) for s in species_names],
-    axis=1
-).fillna(0)
-latent_muscle_df["mean_importance"] = latent_muscle_df.mean(axis=1)
-latent_muscle_df["std_importance"] = latent_muscle_df[species_names].std(axis=1)
-
-yaw_feat_df = pd.concat(
-    [effective_yaw_abs_importance[s].rename(s) for s in species_names],
-    axis=1
-)
-yaw_feat_df["mean_importance"] = yaw_feat_df.mean(axis=1)
-yaw_feat_df["std_importance"] = yaw_feat_df[species_names].std(axis=1)
-
-yaw_muscle_df = pd.concat(
-    [effective_yaw_muscle_importance[s].rename(s) for s in species_names],
-    axis=1
-).fillna(0)
-yaw_muscle_df["mean_importance"] = yaw_muscle_df.mean(axis=1)
-yaw_muscle_df["std_importance"] = yaw_muscle_df[species_names].std(axis=1)
-
-
-print("\n" + "=" * 70)
-print("TOP LATENT-SPACE FEATURES ACROSS SPECIES")
-print("=" * 70)
-print(latent_feat_df["mean_importance"].sort_values(ascending=False).head(25))
-
-print("\n" + "=" * 70)
-print("TOP LATENT-SPACE MUSCLES ACROSS SPECIES")
-print("=" * 70)
-print(latent_muscle_df["mean_importance"].sort_values(ascending=False).head(25))
-
-print("\n" + "=" * 70)
-print("TOP YAW-RELATED FEATURES ACROSS SPECIES")
-print("=" * 70)
-print(yaw_feat_df["mean_importance"].sort_values(ascending=False).head(25))
-
-print("\n" + "=" * 70)
-print("TOP YAW-RELATED MUSCLES ACROSS SPECIES")
-print("=" * 70)
-print(yaw_muscle_df["mean_importance"].sort_values(ascending=False).head(25))
-
-print("\n" + "=" * 70)
-print("TOP RAW-VARIANCE FEATURES IN DATASET")
-print("=" * 70)
-print(raw_feature_variance.head(25))
-
-
-species_to_inspect = species_names[0]   # change this if you want
-W_df = encoder_tables[species_to_inspect]
-
-print("\n" + "=" * 70)
-print(f"TOP FEATURES DEFINING z1 and z2 FOR {species_to_inspect}")
-print("=" * 70)
-
-for z_name in W_df.index:
-    top = W_df.loc[z_name].abs().sort_values(ascending=False).head(15)
-    print(f"\nTop features for {z_name}:")
-    for feat in top.index:
-        print(f"{feat}: {W_df.loc[z_name, feat]:.4f}")
-
-# 1) top latent-space features across species
-top_latent_feats = latent_feat_df["mean_importance"].sort_values(ascending=False).head(20)
-
-plt.figure(figsize=(10, 7))
-top_latent_feats.sort_values().plot(kind="barh")
-plt.xlabel("Mean latent importance across species")
-plt.title("Top spike features shaping latent space")
-plt.tight_layout()
-plt.show()
-
-# 2) top latent-space muscles across species
-top_latent_muscles = latent_muscle_df["mean_importance"].sort_values(ascending=False).head(15)
-
-plt.figure(figsize=(8, 6))
-top_latent_muscles.sort_values().plot(kind="barh")
-plt.xlabel("Mean latent importance across species")
-plt.title("Top muscles shaping latent space")
-plt.tight_layout()
-plt.show()
-
-# 3) top yaw-related features across species
-top_yaw_feats = yaw_feat_df["mean_importance"].sort_values(ascending=False).head(20)
-
-plt.figure(figsize=(10, 7))
-top_yaw_feats.sort_values().plot(kind="barh")
-plt.xlabel("Mean |effective yaw weight| across species")
-plt.title("Top spike features affecting predicted yaw")
-plt.tight_layout()
-plt.show()
-
-# 4) top yaw-related muscles across species
-top_yaw_muscles = yaw_muscle_df["mean_importance"].sort_values(ascending=False).head(15)
-
-plt.figure(figsize=(8, 6))
-top_yaw_muscles.sort_values().plot(kind="barh")
-plt.xlabel("Mean |effective yaw weight| across species")
-plt.title("Top muscles affecting predicted yaw")
-plt.tight_layout()
-plt.show()
-
-latent_feat_df.to_csv("latent_feature_importance_by_species.csv")
-latent_muscle_df.to_csv("latent_muscle_importance_by_species.csv")
-yaw_feat_df.to_csv("yaw_feature_importance_by_species.csv")
-yaw_muscle_df.to_csv("yaw_muscle_importance_by_species.csv")
-raw_feature_variance.to_csv("raw_feature_variance.csv")
-
-print("\nSaved:")
-print("- latent_feature_importance_by_species.csv")
-print("- latent_muscle_importance_by_species.csv")
-print("- yaw_feature_importance_by_species.csv")
-print("- yaw_muscle_importance_by_species.csv")
-print("- raw_feature_variance.csv")
+results_df.to_csv("multi_encoder_yaw_results.csv", index=False)
+X_model.to_csv("motor_program_track2_inputs.csv", index=False)
