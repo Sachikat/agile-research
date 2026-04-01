@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
-from analysis import get_encoder_weight_df, overall_latent_importance, aggregate_by_muscle, get_effective_yaw_weights, get_raw_feature_variance
+from analysis import *
 
 df = pd.read_csv("preprocessedCache.csv")
 
@@ -34,7 +34,6 @@ clade_dict = {
 }
 df["clade"] = df["species"].map(clade_dict)
 
-
 def base_muscle(m):
     m = str(m)
 
@@ -49,18 +48,55 @@ def base_muscle(m):
 
     return m
 
-
 df["muscle_base"] = df["muscle"].apply(base_muscle)
 
-group_cols = ["species", "moth", "trial", "wb", "muscle_base"]
+n_spikes_keep = 10
+min_valid_wingbeats_per_species = 20
+wingbeat_keys = ["species", "moth", "trial", "wb"]
+group_cols = wingbeat_keys + ["muscle_base"]
 
-df_sorted = df.sort_values(group_cols + ["phase"]).copy()
-df_sorted["spike_idx"] = df_sorted.groupby(group_cols).cumcount() + 1
+all_muscles = sorted(df["muscle_base"].dropna().unique())
+all_muscle_set = set(all_muscles)
 
-df_first10 = df_sorted[df_sorted["spike_idx"] <= 10].copy()
+print("All muscles in dataset:")
+print(all_muscles)
+print("Number of muscles:", len(all_muscles))
 
-X_phase = df_first10.pivot_table(
-    index=["species", "moth", "trial", "wb"],
+wingbeat_muscles = (
+    df.groupby(wingbeat_keys)["muscle_base"]
+    .unique()
+    .reset_index()
+)
+
+wingbeat_muscles["has_all_muscles"] = wingbeat_muscles["muscle_base"].apply(
+    lambda x: set(x) == all_muscle_set
+)
+
+valid_wingbeats = wingbeat_muscles[wingbeat_muscles["has_all_muscles"]].copy()
+
+print("\nTotal wingbeats:", len(wingbeat_muscles))
+print("Wingbeats with all muscles present:", len(valid_wingbeats))
+
+if len(valid_wingbeats) == 0:
+    raise ValueError("No wingbeats contain all muscles at least once.")
+
+df_valid = df.merge(
+    valid_wingbeats[wingbeat_keys],
+    on=wingbeat_keys,
+    how="inner"
+).copy()
+
+print("Rows after valid-wingbeat filter:", len(df_valid))
+
+df_valid = df_valid.sort_values(group_cols + ["phase"]).copy()
+df_valid["spike_idx"] = df_valid.groupby(group_cols).cumcount() + 1
+
+df_firstN = df_valid[df_valid["spike_idx"] <= n_spikes_keep].copy()
+
+print(f"Rows after taking first {n_spikes_keep} spikes:", len(df_firstN))
+
+X_phase = df_firstN.pivot_table(
+    index=wingbeat_keys,
     columns=["muscle_base", "spike_idx"],
     values="phase",
     aggfunc="first"
@@ -69,104 +105,156 @@ X_phase = df_first10.pivot_table(
 X_phase.columns = [f"{muscle}_spike{int(spike)}" for muscle, spike in X_phase.columns]
 X_phase = X_phase.reset_index()
 
-reference_muscles = []
-for ref in reference_muscles:
-    for col in X_phase.columns:
-        if "_spike" not in col:
-            continue
+print("Wingbeats after pivot:", len(X_phase))
+print("Timing columns after pivot:", len([c for c in X_phase.columns if "_spike" in c]))
 
-        muscle_name = col.split("_spike")[0]
-        spike_num = col.split("_spike")[1]
-        ref_col = f"{ref}_spike{spike_num}"
+spike_counts = (
+    df_valid.groupby(group_cols)
+    .size()
+    .clip(upper=n_spikes_keep)
+    .reset_index(name="n_spikes")
+)
 
-        if ref_col in X_phase.columns and muscle_name != ref:
-            new_col = f"{muscle_name}_minus_{ref}_spike{spike_num}"
-            X_phase[new_col] = X_phase[col] - X_phase[ref_col]
+X_counts = spike_counts.pivot_table(
+    index=wingbeat_keys,
+    columns="muscle_base",
+    values="n_spikes",
+    aggfunc="first"
+)
 
-meta = df.groupby(["species", "moth", "trial", "wb"]).agg({
+X_counts.columns = [f"{muscle}_n_spikes" for muscle in X_counts.columns]
+X_counts = X_counts.reset_index()
+
+print("Spike-count columns:", len([c for c in X_counts.columns if c.endswith("_n_spikes")]))
+
+meta = df_valid.groupby(wingbeat_keys).agg({
     "wbfreq": "mean",
     "clade": "first"
 }).reset_index()
 
-target = df.groupby(["species", "moth", "trial", "wb"]).agg({
+target = df_valid.groupby(wingbeat_keys).agg({
     "tz": "mean"
 }).reset_index()
 
-X = X_phase.merge(meta, on=["species", "moth", "trial", "wb"], how="left")
-X = X.merge(target, on=["species", "moth", "trial", "wb"], how="left")
+X = X_phase.merge(X_counts, on=wingbeat_keys, how="left")
+X = X.merge(meta, on=wingbeat_keys, how="left")
+X = X.merge(target, on=wingbeat_keys, how="left")
+
+print("Merged dataset shape:", X.shape)
 
 non_features = ["species", "moth", "trial", "wb", "wbfreq", "clade", "tz"]
-required_muscles = sorted(df["muscle_base"].dropna().unique())
 
-print("Required muscles:")
-print(required_muscles)
+timing_feature_cols = [c for c in X.columns if "_spike" in c and not c.endswith("_n_spikes")]
+count_feature_cols = [c for c in X.columns if c.endswith("_n_spikes")]
 
-required_feature_cols = []
-for muscle in required_muscles:
-    for k in range(1, 11):
-        col = f"{muscle}_spike{k}"
-        if col in X.columns:
-            required_feature_cols.append(col)
+print("Timing feature count:", len(timing_feature_cols))
+print("Count feature count:", len(count_feature_cols))
 
-X_complete = X.dropna(subset=required_feature_cols).copy()
+mask_df = X[timing_feature_cols].isna().astype(float)
+mask_df.columns = [f"{c}_missing" for c in timing_feature_cols]
+mask_feature_cols = list(mask_df.columns)
 
-print("Rows before complete-case filtering:", len(X))
-print("Rows after complete-case filtering:", len(X_complete))
+print("Mask feature count:", len(mask_feature_cols))
 
-feature_cols = [c for c in X_complete.columns if c not in non_features]
-
-min_valid_wingbeats_per_species = 20
-
-species_counts = X_complete["species"].value_counts()
+species_counts = X["species"].value_counts()
 valid_species = species_counts[species_counts >= min_valid_wingbeats_per_species].index.tolist()
 
-X_complete = X_complete[X_complete["species"].isin(valid_species)].copy()
+X = X[X["species"].isin(valid_species)].copy()
+mask_df = mask_df.loc[X.index].copy()
 
-print("\nSpecies retained after complete-case filtering:")
-print(X_complete["species"].value_counts())
+print("\nSpecies retained:")
+print(X["species"].value_counts())
 
-min_wb = X_complete["species"].value_counts().min()
+if len(X) == 0:
+    raise ValueError("No species remain after filtering for minimum wingbeat count.")
+
+min_wb = X["species"].value_counts().min()
 
 X_bal = (
-    X_complete.groupby("species", group_keys=False)
+    X.groupby("species", group_keys=False)
     .sample(min_wb, random_state=0)
-    .reset_index(drop=True)
+    .sort_index()
+    .copy()
 )
 
-print("Wingbeats per species:", min_wb)
-print("Final dataset shape:", X_bal.shape)
-print("Number of features:", len(feature_cols))
+mask_bal = mask_df.loc[X_bal.index].copy()
 
+print("\nWingbeats per species after balancing:", min_wb)
+print("Balanced dataset shape:", X_bal.shape)
 
 species_names = sorted(X_bal["species"].unique())
-species_idx = {s: i for i, s in enumerate(species_names)}
-idx_species = {i: s for s, i in species_idx.items()}
+species_to_idx = {s: i for i, s in enumerate(species_names)}
+idx_to_species = {i: s for s, i in species_to_idx.items()}
 
-X_bal["species_idx"] = X_bal["species"].map(species_idx)
+X_bal["species_idx"] = X_bal["species"].map(species_to_idx)
 num_species = len(species_names)
 
+timing_values = X_bal[timing_feature_cols].copy()
 
-X_input = X_bal[feature_cols].values
-y_target = X_bal["tz"].values
-species_idx = X_bal["species_idx"].values
+all_nan_timing_cols = timing_values.columns[timing_values.isna().all()].tolist()
+if len(all_nan_timing_cols) > 0:
+    print("\nDropping all-NaN timing columns:")
+    print(all_nan_timing_cols)
 
-X_train, X_test, y_train, y_test, species_train, species_test = train_test_split(
-    X_input,
-    y_target,
-    species_idx,
+timing_values = timing_values.drop(columns=all_nan_timing_cols)
+timing_feature_cols = [c for c in timing_feature_cols if c not in all_nan_timing_cols]
+
+mask_feature_cols = [f"{c}_missing" for c in timing_feature_cols]
+mask_bal = mask_bal[mask_feature_cols].copy()
+
+timing_values = timing_values.fillna(timing_values.mean())
+
+count_values = X_bal[count_feature_cols].copy().fillna(0)
+
+print("\nRemaining NaNs after imputation:")
+print("timing:", timing_values.isna().sum().sum())
+print("counts:", count_values.isna().sum().sum())
+print("masks:", mask_bal.isna().sum().sum())
+
+X_model = pd.concat(
+    [
+        X_bal[wingbeat_keys + ["wbfreq", "clade", "tz", "species_idx"]].reset_index(drop=True),
+        timing_values.reset_index(drop=True),
+        count_values.reset_index(drop=True),
+        mask_bal.reset_index(drop=True)
+    ],
+    axis=1
+)
+
+model_feature_cols = timing_feature_cols + count_feature_cols + mask_feature_cols
+
+print("\nFinal model feature count:", len(model_feature_cols))
+print("Any NaNs in model features?", X_model[model_feature_cols].isna().any().any())
+print("Any NaNs in tz?", X_model["tz"].isna().any())
+
+X_train_df, X_test_df, y_train, y_test, species_train, species_test = train_test_split(
+    X_model[model_feature_cols],
+    X_model["tz"].values,
+    X_model["species_idx"].values,
     test_size=0.2,
     random_state=42,
-    stratify=species_idx
+    stratify=X_model["species_idx"].values
 )
+
+numeric_feature_cols = timing_feature_cols + count_feature_cols
 
 x_scaler = StandardScaler()
 y_scaler = StandardScaler()
 
-X_train = x_scaler.fit_transform(X_train)
-X_test = x_scaler.transform(X_test)
+X_train_numeric = x_scaler.fit_transform(X_train_df[numeric_feature_cols])
+X_test_numeric = x_scaler.transform(X_test_df[numeric_feature_cols])
+
+X_train_masks = X_train_df[mask_feature_cols].values.astype(np.float32)
+X_test_masks = X_test_df[mask_feature_cols].values.astype(np.float32)
+
+X_train = np.concatenate([X_train_numeric, X_train_masks], axis=1)
+X_test = np.concatenate([X_test_numeric, X_test_masks], axis=1)
 
 y_train = y_scaler.fit_transform(y_train.reshape(-1, 1)).ravel()
 y_test = y_scaler.transform(y_test.reshape(-1, 1)).ravel()
+
+print("Train shape:", X_train.shape)
+print("Test shape:", X_test.shape)
 
 class MotorDataset(Dataset):
     def __init__(self, X, y, species_idx):
@@ -187,19 +275,15 @@ test_ds = MotorDataset(X_test, y_test, species_test)
 train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
 test_loader = DataLoader(test_ds, batch_size=64, shuffle=False)
 
-
-class MultiEncoderLinearAEYaw(nn.Module):
+class MultiEncoderYawModel(nn.Module):
     def __init__(self, input_dim, latent_dim, num_species):
         super().__init__()
         self.latent_dim = latent_dim
 
-        # multiple encoders - linear
         self.encoders = nn.ModuleList([
             nn.Linear(input_dim, latent_dim) for _ in range(num_species)
         ])
 
-        # universal decoder - linear 
-        self.decoder_x = nn.Linear(latent_dim, input_dim)
         self.decoder_y = nn.Linear(latent_dim, 1)
 
     def forward(self, x, species_idx):
@@ -209,40 +293,22 @@ class MultiEncoderLinearAEYaw(nn.Module):
             mask = (species_idx == s)
             z[mask] = self.encoders[s.item()](x[mask])
 
-        x_hat = self.decoder_x(z)
         y_hat = self.decoder_y(z)
-        return x_hat, y_hat, z
+        return y_hat, z
 
-def train_model(
-    model,
-    train_loader,
-    test_loader,
-    alpha_recon=1.0,
-    beta_yaw=1.0,
-    epochs=200,
-    lr=1e-3,
-    weight_decay=1e-4,
-    device="cpu"
-):
+def train_model(model, train_loader, test_loader, epochs=200, lr=1e-3, weight_decay=1e-4, device="cpu"):
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.MSELoss()
 
     history = {
-        "train_total": [],
-        "test_total": [],
-        "train_recon": [],
-        "test_recon": [],
         "train_yaw": [],
         "test_yaw": []
     }
 
     for epoch in range(epochs):
         model.train()
-
         total_train = 0.0
-        total_train_recon = 0.0
-        total_train_yaw = 0.0
 
         for xb, yb, sb in train_loader:
             xb = xb.to(device)
@@ -250,33 +316,18 @@ def train_model(
             sb = sb.to(device)
 
             optimizer.zero_grad()
-
-            x_hat, y_hat, z = model(xb, sb)
-
-            recon_loss = loss_fn(x_hat, xb)
-            yaw_loss = loss_fn(y_hat, yb)
-            loss = alpha_recon * recon_loss + beta_yaw * yaw_loss
-
+            y_hat, z = model(xb, sb)
+            loss = loss_fn(y_hat, yb)
             loss.backward()
             optimizer.step()
 
             total_train += loss.item() * xb.size(0)
-            total_train_recon += recon_loss.item() * xb.size(0)
-            total_train_yaw += yaw_loss.item() * xb.size(0)
 
         avg_train = total_train / len(train_loader.dataset)
-        avg_train_recon = total_train_recon / len(train_loader.dataset)
-        avg_train_yaw = total_train_yaw / len(train_loader.dataset)
-
-        history["train_total"].append(avg_train)
-        history["train_recon"].append(avg_train_recon)
-        history["train_yaw"].append(avg_train_yaw)
+        history["train_yaw"].append(avg_train)
 
         model.eval()
-
         total_test = 0.0
-        total_test_recon = 0.0
-        total_test_yaw = 0.0
 
         with torch.no_grad():
             for xb, yb, sb in test_loader:
@@ -284,39 +335,21 @@ def train_model(
                 yb = yb.to(device)
                 sb = sb.to(device)
 
-                x_hat, y_hat, z = model(xb, sb)
-
-                recon_loss = loss_fn(x_hat, xb)
-                yaw_loss = loss_fn(y_hat, yb)
-                loss = alpha_recon * recon_loss + beta_yaw * yaw_loss
-
+                y_hat, z = model(xb, sb)
+                loss = loss_fn(y_hat, yb)
                 total_test += loss.item() * xb.size(0)
-                total_test_recon += recon_loss.item() * xb.size(0)
-                total_test_yaw += yaw_loss.item() * xb.size(0)
 
         avg_test = total_test / len(test_loader.dataset)
-        avg_test_recon = total_test_recon / len(test_loader.dataset)
-        avg_test_yaw = total_test_yaw / len(test_loader.dataset)
-
-        history["test_total"].append(avg_test)
-        history["test_recon"].append(avg_test_recon)
-        history["test_yaw"].append(avg_test_yaw)
+        history["test_yaw"].append(avg_test)
 
         if epoch % 20 == 0 or epoch == epochs - 1:
-            print(
-                f"Epoch {epoch:3d} | "
-                f"Train total {avg_train:.4f} | Test total {avg_test:.4f} | "
-                f"Train recon {avg_train_recon:.4f} | Test recon {avg_test_recon:.4f} | "
-                f"Train yaw {avg_train_yaw:.4f} | Test yaw {avg_test_yaw:.4f}"
-            )
+            print(f"Epoch {epoch:3d} | Train yaw {avg_train:.4f} | Test yaw {avg_test:.4f}")
 
     return history
 
-def evaluate_model(model, loader, x_scaler, y_scaler, device="cpu"):
+def evaluate_model(model, loader, y_scaler, device="cpu"):
     model.eval()
 
-    x_true_all = []
-    x_hat_all = []
     y_true_all = []
     y_pred_all = []
     z_all = []
@@ -328,133 +361,143 @@ def evaluate_model(model, loader, x_scaler, y_scaler, device="cpu"):
             yb = yb.to(device)
             sb = sb.to(device)
 
-            x_hat, y_hat, z = model(xb, sb)
+            y_hat, z = model(xb, sb)
 
-            x_true_all.append(xb.cpu().numpy())
-            x_hat_all.append(x_hat.cpu().numpy())
             y_true_all.append(yb.cpu().numpy())
             y_pred_all.append(y_hat.cpu().numpy())
             z_all.append(z.cpu().numpy())
             species_all.append(sb.cpu().numpy())
 
-    x_true = np.vstack(x_true_all)
-    x_hat = np.vstack(x_hat_all)
     y_true = np.vstack(y_true_all).ravel()
     y_pred = np.vstack(y_pred_all).ravel()
     Z = np.vstack(z_all)
-    species_out = np.concatenate(species_all)
-
-    x_true_unscaled = x_scaler.inverse_transform(x_true)
-    x_hat_unscaled = x_scaler.inverse_transform(x_hat)
+    species_idx_out = np.concatenate(species_all)
 
     y_true_unscaled = y_scaler.inverse_transform(y_true.reshape(-1, 1)).ravel()
     y_pred_unscaled = y_scaler.inverse_transform(y_pred.reshape(-1, 1)).ravel()
 
-    recon_mse = mean_squared_error(x_true_unscaled.ravel(), x_hat_unscaled.ravel())
     yaw_mse = mean_squared_error(y_true_unscaled, y_pred_unscaled)
     yaw_r2 = r2_score(y_true_unscaled, y_pred_unscaled)
 
     return {
-        "x_true": x_true_unscaled,
-        "x_hat": x_hat_unscaled,
         "y_true": y_true_unscaled,
         "y_pred": y_pred_unscaled,
         "Z": Z,
-        "species_idx": species_out,
-        "recon_mse": recon_mse,
+        "species_idx": species_idx_out,
         "yaw_mse": yaw_mse,
         "yaw_r2": yaw_r2
     }
 
+def get_effective_yaw_weights(model, feature_cols, species_names):
+    yaw_w = model.decoder_y.weight.detach().cpu().numpy().reshape(-1)
+    out = {}
+
+    for i, species in enumerate(species_names):
+        E = model.encoders[i].weight.detach().cpu().numpy()
+        eff = yaw_w @ E
+        out[species] = pd.Series(eff, index=feature_cols).sort_values(key=np.abs, ascending=False)
+
+    return out
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
-print("Using device:", device)
+print("\nUsing device:", device)
 
 results = []
 
-latent_dim = 2
+for latent_dim in [16, 8, 4, 2]:
+    print("\n======================================")
+    print(f"MULTI-ENCODER YAW MODEL | latent_dim = {latent_dim}")
+    print("======================================")
 
-model = MultiEncoderLinearAEYaw(
-    input_dim=len(feature_cols),
-    latent_dim=latent_dim,
-    num_species=num_species
-)
+    model = MultiEncoderYawModel(
+        input_dim=X_train.shape[1],
+        latent_dim=latent_dim,
+        num_species=num_species
+    )
 
-history = train_model(
-    model,
-    train_loader,
-    test_loader,
-    alpha_recon=1.0,
-    beta_yaw=1.0,
-    epochs=200,
-    lr=1e-3,
-    weight_decay=1e-4,
-    device=device
-)
+    history = train_model(
+        model,
+        train_loader,
+        test_loader,
+        epochs=200,
+        lr=1e-3,
+        weight_decay=1e-4,
+        device=device
+    )
 
-eval_out = evaluate_model(
-    model,
-    test_loader,
-    x_scaler,
-    y_scaler,
-    device=device
-)
+    eval_out = evaluate_model(
+        model,
+        test_loader,
+        y_scaler,
+        device=device
+    )
 
-print("Reconstruction MSE:", eval_out["recon_mse"])
-print("Yaw MSE:", eval_out["yaw_mse"])
-print("Yaw R2:", eval_out["yaw_r2"])
+    print("Yaw MSE:", eval_out["yaw_mse"])
+    print("Yaw R2 :", eval_out["yaw_r2"])
 
-results.append({
-    "latent_dim": latent_dim,
-    "recon_mse": eval_out["recon_mse"],
-    "yaw_mse": eval_out["yaw_mse"],
-    "yaw_r2": eval_out["yaw_r2"]
-})
+    results.append({
+        "latent_dim": latent_dim,
+        "yaw_mse": eval_out["yaw_mse"],
+        "yaw_r2": eval_out["yaw_r2"]
+    })
 
-# total loss
-plt.figure(figsize=(7, 5))
-plt.plot(history["train_total"], label="train total")
-plt.plot(history["test_total"], label="test total")
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.title(f"Total loss (latent_dim={latent_dim})")
-plt.legend()
-plt.tight_layout()
-plt.savefig(f"multi_encoder_total_loss_dim_{latent_dim}.png")
-plt.show()
-
-# yaw pred
-plt.figure(figsize=(6, 6))
-plt.scatter(eval_out["y_true"], eval_out["y_pred"], alpha=0.6, s=12)
-mn = min(eval_out["y_true"].min(), eval_out["y_pred"].min())
-mx = max(eval_out["y_true"].max(), eval_out["y_pred"].max())
-plt.plot([mn, mx], [mn, mx], "--")
-plt.xlabel("True tz")
-plt.ylabel("Predicted tz")
-plt.title(f"Predicted vs true yaw torque (latent_dim={latent_dim})")
-plt.tight_layout()
-plt.savefig(f"multi_encoder_pred_vs_true_dim_{latent_dim}.png")
-plt.show()
-
-# latent plot
-if latent_dim >= 2:
-    plt.figure(figsize=(9, 7))
-    for s in np.unique(eval_out["species_idx"]):
-        mask = eval_out["species_idx"] == s
-        plt.scatter(
-            eval_out["Z"][mask, 0],
-            eval_out["Z"][mask, 1],
-            s=10,
-            alpha=0.6,
-            label=idx_species[s]
-        )
-
-    plt.xlabel("Latent 1")
-    plt.ylabel("Latent 2")
-    plt.title(f"Shared latent space (latent_dim={latent_dim})")
-    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
+    plt.figure(figsize=(7, 5))
+    plt.plot(history["train_yaw"], label="train yaw")
+    plt.plot(history["test_yaw"], label="test yaw")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE loss")
+    plt.title(f"Yaw loss (latent_dim={latent_dim})")
+    plt.legend()
     plt.tight_layout()
-    plt.savefig(f"multi_encoder_latent_space_dim_{latent_dim}.png")
+    plt.savefig(f"yaw_loss_dim_{latent_dim}.png")
     plt.show()
+
+    plt.figure(figsize=(6, 6))
+    plt.scatter(eval_out["y_true"], eval_out["y_pred"], alpha=0.6, s=12)
+    mn = min(eval_out["y_true"].min(), eval_out["y_pred"].min())
+    mx = max(eval_out["y_true"].max(), eval_out["y_pred"].max())
+    plt.plot([mn, mx], [mn, mx], "--")
+    plt.xlabel("True tz")
+    plt.ylabel("Predicted tz")
+    plt.title(f"Predicted vs true yaw torque (latent_dim={latent_dim})")
+    plt.tight_layout()
+    plt.savefig(f"yaw_pred_vs_true_dim_{latent_dim}.png")
+    plt.show()
+
+    if latent_dim >= 2:
+        plt.figure(figsize=(9, 7))
+        for s in np.unique(eval_out["species_idx"]):
+            mask = eval_out["species_idx"] == s
+            plt.scatter(
+                eval_out["Z"][mask, 0],
+                eval_out["Z"][mask, 1],
+                s=10,
+                alpha=0.6,
+                label=idx_to_species[s]
+            )
+
+        plt.xlabel("Latent 1")
+        plt.ylabel("Latent 2")
+        plt.title(f"Shared latent space (latent_dim={latent_dim})")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
+        plt.tight_layout()
+        plt.savefig(f"yaw_shared_latent_dim_{latent_dim}.png")
+        plt.show()
+
+    effective_yaw_weights = get_effective_yaw_weights(model, model_feature_cols, species_names)
+
+    print("\nTop yaw-related features by species:")
+    for species in species_names:
+        print("\n" + "=" * 60)
+        print(species)
+        print("=" * 60)
+        print(effective_yaw_weights[species].head(15))
+
+    yaw_weight_df = pd.concat(
+        [effective_yaw_weights[s].rename(s) for s in species_names],
+        axis=1
+    )
+    yaw_weight_df.to_csv(f"yaw_feature_weights_dim_{latent_dim}.csv")
 
 results_df = pd.DataFrame(results)
 print("\nFinal results:")
