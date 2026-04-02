@@ -169,14 +169,17 @@ print(X["species"].value_counts())
 if len(X) == 0:
     raise ValueError("No species remain after filtering for minimum wingbeat count.")
 
-min_wb = X["species"].value_counts().min()
+# Remove subsampling
+# min_wb = X["species"].value_counts().min()
 
-X_bal = (
-    X.groupby("species", group_keys=False)
-    .sample(min_wb, random_state=0)
-    .sort_index()
-    .copy()
-)
+# X_bal = (
+#     X.groupby("species", group_keys=False)
+#     .sample(min_wb, random_state=0)
+#     .sort_index()
+#     .copy()
+# )
+
+X_bal = X.copy()
 
 mask_bal = mask_df.loc[X_bal.index].copy()
 
