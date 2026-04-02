@@ -183,7 +183,7 @@ X_bal = X.copy()
 
 mask_bal = mask_df.loc[X_bal.index].copy()
 
-print("\nWingbeats per species after balancing:", min_wb)
+#print("\nWingbeats per species after balancing:", min_wb)
 print("Balanced dataset shape:", X_bal.shape)
 
 species_names = sorted(X_bal["species"].unique())
