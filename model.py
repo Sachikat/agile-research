@@ -406,102 +406,103 @@ print("\nUsing device:", device)
 
 results = []
 
-for latent_dim in [16, 8, 4, 2]:
-    print("\n======================================")
-    print(f"MULTI-ENCODER YAW MODEL | latent_dim = {latent_dim}")
-    print("======================================")
+latent_dim = 2
 
-    model = MultiEncoderYawModel(
-        input_dim=X_train.shape[1],
-        latent_dim=latent_dim,
-        num_species=num_species
-    )
+print("\n======================================")
+print(f"MULTI-ENCODER YAW MODEL | latent_dim = {latent_dim}")
+print("======================================")
 
-    history = train_model(
-        model,
-        train_loader,
-        test_loader,
-        epochs=200,
-        lr=1e-3,
-        weight_decay=1e-4,
-        device=device
-    )
+model = MultiEncoderYawModel(
+    input_dim=X_train.shape[1],
+    latent_dim=latent_dim,
+    num_species=num_species
+)
 
-    eval_out = evaluate_model(
-        model,
-        test_loader,
-        y_scaler,
-        device=device
-    )
+history = train_model(
+    model,
+    train_loader,
+    test_loader,
+    epochs=200,
+    lr=1e-3,
+    weight_decay=1e-4,
+    device=device
+)
 
-    print("Yaw MSE:", eval_out["yaw_mse"])
-    print("Yaw R2 :", eval_out["yaw_r2"])
+eval_out = evaluate_model(
+    model,
+    test_loader,
+    y_scaler,
+    device=device
+)
 
-    results.append({
-        "latent_dim": latent_dim,
-        "yaw_mse": eval_out["yaw_mse"],
-        "yaw_r2": eval_out["yaw_r2"]
-    })
+print("Yaw MSE:", eval_out["yaw_mse"])
+print("Yaw R2 :", eval_out["yaw_r2"])
 
-    plt.figure(figsize=(7, 5))
-    plt.plot(history["train_yaw"], label="train yaw")
-    plt.plot(history["test_yaw"], label="test yaw")
-    plt.xlabel("Epoch")
-    plt.ylabel("MSE loss")
-    plt.title(f"Yaw loss (latent_dim={latent_dim})")
-    plt.legend()
+results.append({
+    "latent_dim": latent_dim,
+    "yaw_mse": eval_out["yaw_mse"],
+    "yaw_r2": eval_out["yaw_r2"]
+})
+
+plt.figure(figsize=(7, 5))
+plt.plot(history["train_yaw"], label="train yaw")
+plt.plot(history["test_yaw"], label="test yaw")
+plt.xlabel("Epoch")
+plt.ylabel("MSE loss")
+plt.title(f"Yaw loss (latent_dim={latent_dim})")
+plt.legend()
+plt.tight_layout()
+plt.savefig(f"yaw_loss_dim_{latent_dim}.png")
+plt.show()
+
+plt.figure(figsize=(6, 6))
+plt.scatter(eval_out["y_true"], eval_out["y_pred"], alpha=0.6, s=12)
+mn = min(eval_out["y_true"].min(), eval_out["y_pred"].min())
+mx = max(eval_out["y_true"].max(), eval_out["y_pred"].max())
+plt.plot([mn, mx], [mn, mx], "--")
+plt.xlabel("True tz")
+plt.ylabel("Predicted tz")
+plt.title(f"Predicted vs true yaw torque (latent_dim={latent_dim})")
+plt.tight_layout()
+plt.savefig(f"yaw_pred_vs_true_dim_{latent_dim}.png")
+plt.show()
+
+if latent_dim >= 2:
+    plt.figure(figsize=(9, 7))
+    for s in np.unique(eval_out["species_idx"]):
+        mask = eval_out["species_idx"] == s
+        plt.scatter(
+            eval_out["Z"][mask, 0],
+            eval_out["Z"][mask, 1],
+            s=10,
+            alpha=0.6,
+            label=idx_to_species[s]
+        )
+
+    plt.xlabel("Latent 1")
+    plt.ylabel("Latent 2")
+    plt.title(f"Shared latent space (latent_dim={latent_dim})")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
     plt.tight_layout()
-    plt.savefig(f"yaw_loss_dim_{latent_dim}.png")
+    plt.savefig(f"yaw_shared_latent_dim_{latent_dim}.png")
     plt.show()
 
-    plt.figure(figsize=(6, 6))
-    plt.scatter(eval_out["y_true"], eval_out["y_pred"], alpha=0.6, s=12)
-    mn = min(eval_out["y_true"].min(), eval_out["y_pred"].min())
-    mx = max(eval_out["y_true"].max(), eval_out["y_pred"].max())
-    plt.plot([mn, mx], [mn, mx], "--")
-    plt.xlabel("True tz")
-    plt.ylabel("Predicted tz")
-    plt.title(f"Predicted vs true yaw torque (latent_dim={latent_dim})")
-    plt.tight_layout()
-    plt.savefig(f"yaw_pred_vs_true_dim_{latent_dim}.png")
-    plt.show()
+# interpretation for this model
+effective_yaw_weights = get_effective_yaw_weights(model, model_feature_cols, species_names)
 
-    if latent_dim >= 2:
-        plt.figure(figsize=(9, 7))
-        for s in np.unique(eval_out["species_idx"]):
-            mask = eval_out["species_idx"] == s
-            plt.scatter(
-                eval_out["Z"][mask, 0],
-                eval_out["Z"][mask, 1],
-                s=10,
-                alpha=0.6,
-                label=idx_to_species[s]
-            )
+print("\nTop yaw-related features by species:")
+for species in species_names:
+    print("\n" + "=" * 60)
+    print(species)
+    print("=" * 60)
+    print(effective_yaw_weights[species].head(15))
 
-        plt.xlabel("Latent 1")
-        plt.ylabel("Latent 2")
-        plt.title(f"Shared latent space (latent_dim={latent_dim})")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
-        plt.tight_layout()
-        plt.savefig(f"yaw_shared_latent_dim_{latent_dim}.png")
-        plt.show()
-
-    # interpretation for this model
-    effective_yaw_weights = get_effective_yaw_weights(model, model_feature_cols, species_names)
-
-    print("\nTop yaw-related features by species:")
-    for species in species_names:
-        print("\n" + "=" * 60)
-        print(species)
-        print("=" * 60)
-        print(effective_yaw_weights[species].head(15))
-
-    # save per-latent-dim feature weights
-    yaw_weight_df = pd.concat(
-        [effective_yaw_weights[s].rename(s) for s in species_names],
-        axis=1
-    )
-    yaw_weight_df.to_csv(f"yaw_feature_weights_dim_{latent_dim}.csv")
+# save per-latent-dim feature weights
+yaw_weight_df = pd.concat(
+    [effective_yaw_weights[s].rename(s) for s in species_names],
+    axis=1
+)
+yaw_weight_df.to_csv(f"yaw_feature_weights_dim_{latent_dim}.csv")
 
 results_df = pd.DataFrame(results)
 print("\nFinal results:")
