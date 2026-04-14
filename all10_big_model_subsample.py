@@ -55,22 +55,22 @@ df_model[target_col] = pd.to_numeric(df_model[target_col], errors="coerce")
 
 df_model = df_model.dropna(subset=[target_col, "species", "moth"]).copy()
 
-# get all wingbeats with 10 muscles represented
-complete_mask = np.ones(len(df_model), dtype=bool)
-for p_col, c_col in zip(phase_cols, count_cols):
-    complete_mask &= df_model[p_col].notna()
-    complete_mask &= df_model[c_col].fillna(0) > 0
+# # get all wingbeats with 10 muscles represented
+# complete_mask = np.ones(len(df_model), dtype=bool)
+# for p_col, c_col in zip(phase_cols, count_cols):
+#     complete_mask &= df_model[p_col].notna()
+#     complete_mask &= df_model[c_col].fillna(0) > 0
 
-df_model = df_model[complete_mask].copy()
+# df_model = df_model[complete_mask].copy()
 
-print("\nRows remaining after requiring all 10 muscles present:", len(df_model))
+# print("\nRows remaining after requiring all 10 muscles present:", len(df_model))
 
 # fill in phase values and count values if missing
-df_model[phase_cols] = df_model[phase_cols].fillna(df_model[phase_cols].mean())
-df_model[count_cols] = df_model[count_cols].fillna(0)
+# df_model[phase_cols] = df_model[phase_cols].fillna(df_model[phase_cols].mean())
+# df_model[count_cols] = df_model[count_cols].fillna(0)
 
-print("\nRemaining NaNs:")
-print(df_model[feature_cols + [target_col]].isna().sum())
+# print("\nRemaining NaNs:")
+# print(df_model[feature_cols + [target_col]].isna().sum())
 
 wb_counts = (
     df_model.groupby("species")
