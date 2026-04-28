@@ -9,7 +9,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 
-df = pd.read_csv("all10_big.csv")
+df = pd.read_csv("all10_big_wb.csv") #i called it all10_big_wb.csv
 
 clade_dict = {
     "Actias luna": "silkmoth",
@@ -54,8 +54,8 @@ df_model[target_col] = pd.to_numeric(df_model[target_col], errors="coerce")
 
 df_model = df_model.dropna(subset=[target_col, "species", "moth"]).copy()
 
-min_wb_to_qualify = 15
-clean_subsample_n = 10
+min_wb_to_qualify = 100
+clean_subsample_n = 150
 
 rng_seed  = 42
 wb_counts = df_model.groupby("species").size()
