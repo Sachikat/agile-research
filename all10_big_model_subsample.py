@@ -90,6 +90,7 @@ individual_names = sorted(df_model["moth"].astype(str).unique())
 individual_to_idx = {m: i for i, m in enumerate(individual_names)}
 df_model["individual_idx"] = df_model["moth"].astype(str).map(individual_to_idx)
 num_individuals = len(individual_names)
+num_species = len(df_model["species"].unique())
 print(f"\nNumber of individuals (encoders): {num_individuals}")
 
 X_df = df_model[feature_cols].copy()
@@ -261,9 +262,9 @@ history = train_model(model, train_loader, test_loader,
 eval_test = evaluate_model(model, test_loader, y_scaler,
                            sp_test, cl_test, wf_test, device=device)
 print(f"\nFinal performance (test set):")
-print(f"  Yaw MSE : {eval_test['yaw_mse']:.4f}")
-print(f"  Yaw R²  : {eval_test['yaw_r2']:.4f}")
-print(f"  Test pts: {len(eval_test['y_true'])}")
+print(f"Yaw MSE : {eval_test['yaw_mse']:.4f}")
+print(f"Yaw R²  : {eval_test['yaw_r2']:.4f}")
+print(f"Test pts: {len(eval_test['y_true'])}")
 
 X_full = df_model[feature_cols].values.astype(np.float32)
 y_full = y_scaler.transform(df_model[target_col].values.reshape(-1, 1)).ravel()
